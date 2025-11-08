@@ -1,8 +1,13 @@
--- LocalScript: Smart Candy auto-teleport + RollEvent spam + Panic
+-- LocalScript: Smart Candy auto-teleport + RollEvent spam + Panic + Camera-facing
 -- Place in StarterPlayer > StarterPlayerScripts
+
+-- VERSION: 1
+-- IMPORTANT: increment SCRIPT_VERSION when you make permanent script changes.
+local SCRIPT_VERSION = 1
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
 local player = Players.LocalPlayer
 local guiParent = player:WaitForChild("PlayerGui")
 local workspace = workspace
@@ -14,11 +19,11 @@ local CANDY_NAME_SUB = "candy"               -- substring to match candy names (
 local AUTO_INTERVAL = 0.1                    -- seconds between auto-teleports
 local TELEPORT_OFFSET = Vector3.new(0, 3, 0) -- small offset to place above candy
 local BOSS_NAME = "HalloweenBoss"
-local CLOSE_DISTANCE = 100                    -- for RollEvent spam proximity
+local CLOSE_DISTANCE = 100                   -- UPDATED: RollEvent spam proximity (studs)
 local PANIC_DISTANCE = 10                    -- panic threshold (higher priority)
 local PANIC_ESCAPE_DISTANCE = 30             -- how far to push player away on panic
 local PANIC_COOLDOWN = 0.5                   -- seconds between panic teleports
-local ROLL_SPAM_INTERVAL = 0.2               -- spam speed when roll spam enabled
+local ROLL_SPAM_INTERVAL = 0.2               -- UPDATED: spam speed when roll spam enabled
 local BOSS_VERTICAL_TOLERANCE = 10           -- ± studs from boss Y allowed for candies
 local TELEPORTED_FLAG_NAME = "Teleported"    -- BoolValue name put inside candy once touched
 
@@ -32,7 +37,7 @@ screen.Name = GUI_NAME
 screen.ResetOnSpawn = false
 
 local frame = Instance.new("Frame", screen)
-frame.Size = UDim2.new(0, 340, 0, 150)
+frame.Size = UDim2.new(0, 340, 0, 170) -- made taller to fit version UI
 frame.Position = UDim2.new(0, 12, 0, 60)
 frame.BackgroundTransparency = 0.15
 frame.BorderSizePixel = 0
@@ -85,6 +90,35 @@ rollBtn.Text = "Roll Spam: OFF"
 rollBtn.Font = Enum.Font.SourceSansBold
 rollBtn.TextSize = 14
 
+-- VERSION UI (new)
+local versionLabel = Instance.new("TextLabel", frame)
+versionLabel.Size = UDim2.new(0, 140, 0, 20)
+versionLabel.Position = UDim2.new(0, 6, 0, 104)
+versionLabel.BackgroundTransparency = 1
+versionLabel.Font = Enum.Font.SourceSans
+versionLabel.TextSize = 14
+versionLabel.TextColor3 = Color3.fromRGB(180,180,180)
+versionLabel.TextXAlignment = Enum.TextXAlignment.Left
+
+-- small bump button to increment version at runtime (useful for testing)
+local bumpBtn = Instance.new("TextButton", frame)
+bumpBtn.Size = UDim2.new(0, 70, 0, 20)
+bumpBtn.Position = UDim2.new(0, 152, 0, 104)
+bumpBtn.Font = Enum.Font.SourceSansBold
+bumpBtn.TextSize = 12
+bumpBtn.Text = "Bump v+1"
+bumpBtn.AutoButtonColor = true
+
+local noteLabel = Instance.new("TextLabel", frame)
+noteLabel.Size = UDim2.new(1, -12, 0, 30)
+noteLabel.Position = UDim2.new(0, 6, 0, 126)
+noteLabel.BackgroundTransparency = 1
+noteLabel.Font = Enum.Font.SourceSans
+noteLabel.TextSize = 11
+noteLabel.TextColor3 = Color3.fromRGB(160,160,160)
+noteLabel.TextWrapped = true
+noteLabel.Text = "Tip: For a permanent version increase, edit the SCRIPT_VERSION constant at the top of this script."
+
 -- helpers
 local function safeFindContainer()
 	return workspace:FindFirstChild(CONTAINER_NAME)
@@ -118,7 +152,9 @@ end
 
 local function randomChoice(list)
 	if not list or #list == 0 then return nil end
-	math.randomseed(tick() * 1000 + #list)
+	-- better randomness seed
+	local s = tick() * 1000 + #list + math.random(1, 1000)
+	math.randomseed(s)
 	return list[math.random(1, #list)]
 end
 
@@ -236,6 +272,21 @@ end
 -- main behaviors
 local auto = false
 local rollSpamEnabled = false
+
+-- version state for runtime (starts from SCRIPT_VERSION)
+local displayVersion = SCRIPT_VERSION
+local function updateVersionLabel()
+	versionLabel.Text = ("Version: v%d"):format(displayVersion)
+end
+updateVersionLabel()
+
+-- runtime bump (does not persist across server restarts; edit SCRIPT_VERSION for a permanent change)
+bumpBtn.MouseButton1Click:Connect(function()
+	displayVersion = displayVersion + 1
+	updateVersionLabel()
+	status.Text = ("Version bumped to v%d (runtime only). Edit SCRIPT_VERSION for permanent change."):format(displayVersion)
+end)
+
 autoBtn.MouseButton1Click:Connect(function()
 	auto = not auto
 	autoBtn.Text = auto and "Auto: ON" or "Auto: OFF"
@@ -268,9 +319,39 @@ rollBtn.MouseButton1Click:Connect(function()
 	rollBtn.Text = rollSpamEnabled and "Roll Spam: ON" or "Roll Spam: OFF"
 end)
 
+-- Camera-facing: rotate camera to look at boss while keeping camera position
+local cameraConn
+local function startCameraFacing()
+	local cam = workspace.CurrentCamera
+	if not cam then return end
+	cameraConn = RunService.RenderStepped:Connect(function()
+		if not screen.Parent then
+			-- GUI removed; stop updating camera
+			if cameraConn then cameraConn:Disconnect() end
+			return
+		end
+		local boss = workspace:FindFirstChild(BOSS_NAME)
+		if not boss then return end
+		local bossPart = getModelRepresentativePart(boss)
+		if not bossPart then return end
+		-- safely get positions
+		local ok1, camPos = pcall(function() return cam.CFrame.Position end)
+		local ok2, bossPos = pcall(function() return bossPart.Position end)
+		if ok1 and ok2 and camPos and bossPos then
+			-- set camera orientation to look at boss while preserving position
+			local newCf = CFrame.new(camPos, bossPos)
+			-- apply non-explosive set in pcall
+			pcall(function() cam.CFrame = newCf end)
+		end
+	end)
+end
+
 -- Auto loop (handles Panic first, then random candy near boss)
 local stopping = false
 task.spawn(function()
+	-- start camera-facing after spawn
+	startCameraFacing()
+
 	while not stopping and screen.Parent do
 		if auto then
 			local boss = workspace:FindFirstChild(BOSS_NAME)
@@ -282,33 +363,30 @@ task.spawn(function()
 				panicked = tryPanicTeleport(bossPart)
 				if panicked then
 					status.Text = "Panic teleport executed!"
-					-- small wait then continue loop (don't immediately attempt candy)
 					task.wait(0.12)
 					task.wait(AUTO_INTERVAL)
-					continue
-				end
-			end
-
-			-- If not panicked, attempt random candy near boss
-			if bossPart then
-				local candies = collectEligibleCandies(bossPart.Position.Y)
-				if #candies > 0 then
-					local pick = randomChoice(candies)
-					local ok, err = teleportToPart(pick)
-					if ok then
-						status.Text = "Auto-teleported to random candy."
-						attachTouchFlag(pick)
-					else
-						status.Text = "Auto teleport failed: "..tostring(err)
-					end
+					-- finished this iteration; continue next loop naturally
 				else
-					status.Text = "No eligible candies near boss."
+					-- not panicked; attempt random candy near boss
+					local candies = collectEligibleCandies(bossPart.Position.Y)
+					if #candies > 0 then
+						local pick = randomChoice(candies)
+						local ok, err = teleportToPart(pick)
+						if ok then
+							status.Text = "Auto-teleported to random candy."
+							attachTouchFlag(pick)
+						else
+							status.Text = "Auto teleport failed: "..tostring(err)
+						end
+					else
+						status.Text = "No eligible candies near boss."
+					end
+					task.wait(AUTO_INTERVAL)
 				end
 			else
 				status.Text = "Boss not found; can't pick candies."
+				task.wait(AUTO_INTERVAL)
 			end
-
-			task.wait(AUTO_INTERVAL)
 		else
 			task.wait(0.25)
 		end
@@ -339,10 +417,15 @@ task.spawn(function()
 				task.wait(0.6)
 			end
 		else
-			task.wait(0.25)
+			task.wait(0.4)
 		end
 	end
 end)
 
 -- cleanup
-screen.Destroying:Connect(function() stopping = true end)
+screen.Destroying:Connect(function()
+	stopping = true
+	if cameraConn and cameraConn.Connected then
+		cameraConn:Disconnect()
+	end
+end)
