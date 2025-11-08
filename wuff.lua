@@ -1,9 +1,9 @@
 -- LocalScript: Smart Candy auto-teleport + RollEvent spam + Panic + Camera-facing
 -- Place in StarterPlayer > StarterPlayerScripts
 
--- VERSION: 3
+-- VERSION: 4
 -- IMPORTANT: increment SCRIPT_VERSION when you make permanent script changes.
-local SCRIPT_VERSION = 3
+local SCRIPT_VERSION = 4
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -118,7 +118,6 @@ noteLabel.Text = "Tip: Edit the SCRIPT_VERSION constant at the top of this scrip
 
 -- ANIMATION GUI (placed beneath the main frame)
 local animFrame = Instance.new("Frame", screen)
--- position directly under the main frame (uses current frame position/size)
 animFrame.Size = UDim2.new(0, 340, 0, 36)
 animFrame.Position = UDim2.new(frame.Position.X.Scale, frame.Position.X.Offset, frame.Position.Y.Scale, frame.Position.Y.Offset + frame.Size.Y.Offset + 8)
 animFrame.BackgroundTransparency = 0.25
@@ -316,7 +315,7 @@ local function tryPanicTeleport(bossPart)
 	end
 end
 
--- main behaviors
+-- MAIN
 local auto = false
 local rollSpamEnabled = false
 
@@ -364,7 +363,27 @@ rollBtn.MouseButton1Click:Connect(function()
 	rollBtn.Text = rollSpamEnabled and "Roll Spam: ON" or "Roll Spam: OFF"
 end)
 
--- Camera-facing: rotate camera to look at boss while keeping camera position
+-- Utility: gather all playing animation tracks from any child that implements GetPlayingAnimationTracks()
+local function getAllPlayingTracks(model)
+	local tracks = {}
+	for _,inst in ipairs(model:GetDescendants()) do
+		-- use pcall to avoid errors on objects without the method
+		local ok, result = pcall(function()
+			if type(inst.GetPlayingAnimationTracks) == "function" then
+				return inst:GetPlayingAnimationTracks()
+			end
+			return nil
+		end)
+		if ok and result and type(result) == "table" and #result > 0 then
+			for _,t in ipairs(result) do
+				table.insert(tracks, t)
+			end
+		end
+	end
+	return tracks
+end
+
+-- Camera-facing: rotate camera to look at boss pivot (model) while keeping camera position
 local cameraConn
 local function startCameraFacing()
 	local cam = workspace.CurrentCamera
@@ -377,13 +396,21 @@ local function startCameraFacing()
 		end
 		local boss = workspace:FindFirstChild(BOSS_NAME)
 		if not boss then return end
-		local bossPart = getModelRepresentativePart(boss)
-		if not bossPart then return end
-		-- safely get positions
+
+		-- try to use model pivot (more accurate "boss model" center); fallback to representative part
+		local bossPos
+		local okPivot, pivot = pcall(function() return boss:GetPivot() end)
+		if okPivot and pivot then
+			bossPos = pivot.Position
+		else
+			local bossPart = getModelRepresentativePart(boss)
+			if bossPart then bossPos = bossPart.Position end
+		end
+		if not bossPos then return end
+
+		-- safely get camera position
 		local ok1, camPos = pcall(function() return cam.CFrame.Position end)
-		local ok2, bossPos = pcall(function() return bossPart.Position end)
-		if ok1 and ok2 and camPos and bossPos then
-			-- set camera orientation to look at boss while preserving position
+		if ok1 and camPos then
 			local newCf = CFrame.new(camPos, bossPos)
 			pcall(function() cam.CFrame = newCf end)
 		end
@@ -475,34 +502,25 @@ task.spawn(function()
 						end
 						lastBossPos = bossPart.Position
 
-						-- check for playing animations on boss's Humanoid and try to extract animation id
+						-- get playing tracks via generic helper (handles Humanoid, AnimationController, Animator, etc.)
+						local tracks = {}
+						local okTracks, resultTracks = pcall(function() return getAllPlayingTracks(boss) end)
+						if okTracks and resultTracks then tracks = resultTracks end
+
+						-- determine if any track is playing; try to extract AnimationId
 						local isPlaying = false
 						local foundAnimId = nil
-						local okAnim, tracks = pcall(function()
-							local h = boss:FindFirstChildWhichIsA("Humanoid")
-							if h then
-								return h:GetPlayingAnimationTracks()
-							end
-							return {}
-						end)
-						if okAnim and tracks and #tracks > 0 then
-							for _,t in ipairs(tracks) do
-								local okP, playing = pcall(function() return t.IsPlaying end)
-								if okP and playing then
-									isPlaying = true
-									-- try to get the Animation.AnimationId (string like "rbxassetid://12345")
-									local okA, animObj = pcall(function() return t.Animation end)
-									if okA and animObj and animObj.AnimationId then
-										-- extract numeric id if possible
-										local id = tostring(animObj.AnimationId)
-										local digits = id:match("%d+")
-										if digits then
-											foundAnimId = digits
-										else
-											foundAnimId = id
-										end
-										break
-									end
+						for _,t in ipairs(tracks) do
+							local okP, playing = pcall(function() return t.IsPlaying end)
+							if okP and playing then
+								isPlaying = true
+								-- try to get the Animation instance on the track
+								local okA, animObj = pcall(function() return t.Animation end)
+								if okA and animObj and animObj.AnimationId then
+									local id = tostring(animObj.AnimationId)
+									local digits = id:match("%d+")
+									if digits then foundAnimId = digits else foundAnimId = id end
+									break
 								end
 							end
 						end
@@ -510,16 +528,17 @@ task.spawn(function()
 						-- update displayed last animation id if we found one
 						if foundAnimId then
 							lastAnimId = foundAnimId
-							animLabel.Text = ("Last Boss Anim ID: %s"):format(tostring(lastAnimId))
+						end
+						-- update anim label text always: show current if playing, else show last known or N/A
+						if isPlaying then
+							animLabel.Text = ("Current Boss Anim ID: %s"):format(tostring(foundAnimId or lastAnimId or "(playing, id unknown)"))
+						else
+							animLabel.Text = ("Last Boss Anim ID: %s"):format(tostring(lastAnimId or "N/A"))
 						end
 
 						-- if boss essentially stopped AND is playing animation, pause roll spam for configured time
 						if speed <= STOP_SPEED_THRESHOLD and isPlaying then
 							status.Text = "Boss stopped & animating — pausing roll spam..."
-							-- ensure the animLabel shows something even if we didn't extract ID
-							if not lastAnimId then
-								animLabel.Text = "Last Boss Anim ID: (playing, id unknown)"
-							end
 							task.wait(ROLL_PAUSE_ON_STOP)
 						else
 							-- normal roll fire
@@ -541,10 +560,56 @@ task.spawn(function()
 	end
 end)
 
+-- Additionally: a Heartbeat updater to keep the animLabel responsive even when rollSpamEnabled is false
+local heartbeatConn = RunService.Heartbeat:Connect(function()
+	if not screen.Parent then
+		if heartbeatConn and heartbeatConn.Connected then heartbeatConn:Disconnect() end
+		return
+	end
+	local boss = workspace:FindFirstChild(BOSS_NAME)
+	if not boss or not boss:IsA("Model") then
+		-- no boss -> show last known or N/A
+		-- (we keep whatever text currently is; do not overwrite with stale N/A to avoid hiding last seen)
+		return
+	end
+
+	-- query playing tracks quickly
+	local okTracks, tracks = pcall(function() return getAllPlayingTracks(boss) end)
+	if not okTracks or not tracks then return end
+	local isPlaying = false
+	local foundAnimId = nil
+	for _,t in ipairs(tracks) do
+		local okP, playing = pcall(function() return t.IsPlaying end)
+		if okP and playing then
+			isPlaying = true
+			local okA, animObj = pcall(function() return t.Animation end)
+			if okA and animObj and animObj.AnimationId then
+				local id = tostring(animObj.AnimationId)
+				local digits = id:match("%d+")
+				foundAnimId = digits or id
+				break
+			end
+		end
+	end
+	-- update animLabel to reflect current playing (or keep last known)
+	if isPlaying then
+		animLabel.Text = ("Current Boss Anim ID: %s"):format(tostring(foundAnimId or "(playing, id unknown)"))
+	else
+		-- when not playing, do nothing here to avoid overwriting the "Last Boss Anim ID" set by roll loop,
+		-- unless it's still the default N/A - then explicitly set N/A
+		if animLabel.Text == "" or animLabel.Text:match("N/A") then
+			animLabel.Text = "Last Boss Anim ID: N/A"
+		end
+	end
+end)
+
 -- cleanup
 screen.Destroying:Connect(function()
 	stopping = true
 	if cameraConn and cameraConn.Connected then
 		cameraConn:Disconnect()
+	end
+	if heartbeatConn and heartbeatConn.Connected then
+		heartbeatConn:Disconnect()
 	end
 end)
