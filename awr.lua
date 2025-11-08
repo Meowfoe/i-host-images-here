@@ -14,7 +14,7 @@ local TELEPORT_OFFSET = Vector3.new(0, 3, 0)
 
 local BOSS_NAME = "HalloweenBoss"     -- model name to monitor
 local CLOSE_DISTANCE = 10             -- studs for "close"
-local ROLL_SPAM_INTERVAL = 0.5        -- how fast to spam RollEvent when active & boss is close
+local ROLL_SPAM_INTERVAL = 0.2        -- how fast to spam RollEvent when active & boss is close
 
 -- cleanup old GUI
 local GUI_NAME = "CandyContainerTeleporter"
@@ -218,4 +218,5 @@ end)
 
 -- cleanup flag
 screen.Destroying:Connect(function() stopping = true end)
+
 
