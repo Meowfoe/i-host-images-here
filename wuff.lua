@@ -1,9 +1,9 @@
 -- LocalScript: Smart Candy auto-teleport + RollEvent spam + Panic + Camera-facing
 -- Place in StarterPlayer > StarterPlayerScripts
 
--- VERSION: 5
+-- VERSION: 6
 -- IMPORTANT: increment SCRIPT_VERSION when you make permanent script changes.
-local SCRIPT_VERSION = 5
+local SCRIPT_VERSION = 6
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -32,12 +32,17 @@ local MIN_SAFE_TELEPORT_DISTANCE = 25        -- try to avoid teleporting to cand
 
 -- SPECIAL ANIMATION WATCH (user request)
 local TARGET_ANIM_ID = "79413205921631"     -- target animation id to watch for
-local SPECIAL_WAIT = 2                     -- seconds to wait AFTER detecting animation, before firing a single roll
+local SPECIAL_WAIT = 2                       -- seconds to wait AFTER detecting animation, before firing a single roll (changed to 2)
 local SPECIAL_COOLDOWN = 5                   -- seconds cooldown between special triggers
 
--- STOP DETECTION (kept but not primary for this feature)
+-- STOP DETECTION (kept but not primary)
 local STOP_SPEED_THRESHOLD = 0.5             -- studs/sec below which boss counts as "stopped"
 local ROLL_PAUSE_ON_STOP = 1.5               -- seconds to pause roll spam when boss stopped AND playing animation
+
+-- LOW-HEALTH SAFETY
+local LOW_HEALTH_THRESHOLD = 20              -- if player's HP below this -> safety
+local EMERGENCY_PLATFORM_OFFSET = Vector3.new(2000, 5, 0) -- offset from current position where platform will be placed (X,Y,Z)
+local EMERGENCY_PLATFORM_SIZE = Vector3.new(30, 2, 30)
 
 -- cleanup old GUI
 local old = guiParent:FindFirstChild(GUI_NAME)
@@ -210,7 +215,16 @@ local function randomChoice(list)
 	return list[math.random(1, #list)]
 end
 
+-- safety mode flag & emergency platform ref
+local safetyTeleportActive = false
+local emergencyPlatform = nil
+local previousAutoState = false
+
+-- modified teleportToPart: respects safety mode
 local function teleportToPart(part)
+	if safetyTeleportActive then
+		return false, "safety mode active - teleport blocked"
+	end
 	if not part or not part:IsDescendantOf(workspace) then return false, "invalid target" end
 	local char = player.Character
 	if not char then return false, "no char" end
@@ -222,8 +236,13 @@ local function teleportToPart(part)
 	return ok, err
 end
 
+local function teleportNowAllowed()
+	return not safetyTeleportActive
+end
+
 -- after teleporting to a candy, wait for player's character to touch it, then mark it
 local function attachTouchFlag(part)
+	if safetyTeleportActive then return end
 	if not part or not part:IsDescendantOf(workspace) then return end
 	if part:FindFirstChild(TELEPORTED_FLAG_NAME) then return end
 
@@ -286,46 +305,94 @@ local function getModelRepresentativePart(model)
 	return nil
 end
 
--- Panic teleport: move player away from boss by PANIC_ESCAPE_DISTANCE
-local lastPanic = 0
-local function tryPanicTeleport(bossPart)
-	if not bossPart then return false end
+-- Emergency platform creation (anchored) and teleport player onto it
+local function createEmergencyPlatformAndTeleport()
+	if safetyTeleportActive then return end
 	local char = player.Character
-	if not char then return false end
+	if not char then return end
 	local hrp = char:FindFirstChild("HumanoidRootPart")
-	if not hrp then return false end
-	local ok, dist = pcall(function() return (bossPart.Position - hrp.Position).Magnitude end)
-	if not ok or not dist then return false end
-	if dist > PANIC_DISTANCE then return false end
-	-- cooldown
-	if tick() - lastPanic < PANIC_COOLDOWN then return false end
+	if not hrp then return end
 
-	-- compute direction from boss -> player, normalize
-	local dir = (hrp.Position - bossPart.Position)
-	if dir.Magnitude <= 0.01 then
-		dir = Vector3.new(0, 0, 1)
-	end
-	local unit = dir.Unit
-	local newPos = hrp.Position + unit * PANIC_ESCAPE_DISTANCE
-	-- keep current Y to avoid weird vertical teleport; add small upward offset to avoid stuck
-	newPos = Vector3.new(newPos.X, hrp.Position.Y + 1.5, newPos.Z)
+	-- mark safety mode
+	safetyTeleportActive = true
+	previousAutoState = auto
+	auto = false -- disable auto-teleporting
+	status.Text = "Low HP detected — safety mode active. Teleporting to safe platform..."
 
-	local ok2, err = pcall(function()
-		hrp.CFrame = CFrame.new(newPos)
+	-- create platform far away relative to current HRP position
+	local platformPos = hrp.Position + EMERGENCY_PLATFORM_OFFSET
+	local plat = Instance.new("Part")
+	plat.Name = "EmergencyPlatform_" .. player.Name
+	plat.Anchored = true
+	plat.CanCollide = true
+	plat.Size = EMERGENCY_PLATFORM_SIZE
+	plat.Position = platformPos
+	plat.Transparency = 0.25
+	plat.Parent = workspace
+	emergencyPlatform = plat
+
+	-- teleport player above platform
+	pcall(function()
+		hrp.CFrame = CFrame.new(platformPos + Vector3.new(0, (EMERGENCY_PLATFORM_SIZE.Y/2) + 3, 0))
 	end)
-	if ok2 then
-		lastPanic = tick()
-		return true
-	else
-		return false
+end
+
+local function removeEmergencyPlatform()
+	if emergencyPlatform and emergencyPlatform.Parent then
+		pcall(function() emergencyPlatform:Destroy() end)
 	end
+	emergencyPlatform = nil
+end
+
+-- Health monitoring & safety logic for local player
+local function monitorHumanoid(humanoid)
+	if not humanoid then return end
+
+	-- helper to decide when healed to full
+	local function checkAndWaitForFullHeal()
+		-- wait until health >= max health (or until humanoid removed)
+		while humanoid and humanoid.Parent and humanoid.Health < humanoid.MaxHealth do
+			task.wait(0.5)
+		end
+		-- restore state
+		removeEmergencyPlatform()
+		safetyTeleportActive = false
+		auto = previousAutoState or false
+		status.Text = "Healed to full — safety mode cleared."
+	end
+
+	-- immediate check
+	if humanoid.Health < LOW_HEALTH_THRESHOLD and not safetyTeleportActive then
+		createEmergencyPlatformAndTeleport()
+		task.spawn(checkAndWaitForFullHeal)
+	end
+
+	-- connect HealthChanged
+	local conn
+	conn = humanoid.HealthChanged:Connect(function(newHealth)
+		if not humanoid or not humanoid.Parent then
+			if conn then conn:Disconnect() end
+			return
+		end
+		if newHealth < LOW_HEALTH_THRESHOLD and not safetyTeleportActive then
+			-- trigger safety flow
+			createEmergencyPlatformAndTeleport()
+			task.spawn(checkAndWaitForFullHeal)
+		end
+	end)
+
+	-- cleanup when humanoid removed
+	humanoid.AncestryChanged:Connect(function(_, parent)
+		if not parent and conn then
+			conn:Disconnect()
+		end
+	end)
 end
 
 -- Utility: gather all playing animation tracks from any child that implements GetPlayingAnimationTracks()
 local function getAllPlayingTracks(model)
 	local tracks = {}
 	for _,inst in ipairs(model:GetDescendants()) do
-		-- use pcall to avoid errors on objects without the method
 		local ok, result = pcall(function()
 			if type(inst.GetPlayingAnimationTracks) == "function" then
 				return inst:GetPlayingAnimationTracks()
@@ -348,7 +415,6 @@ local function startCameraFacing()
 	if not cam then return end
 	cameraConn = RunService.RenderStepped:Connect(function()
 		if not screen.Parent then
-			-- GUI removed; stop updating camera
 			if cameraConn then cameraConn:Disconnect() end
 			return
 		end
@@ -366,7 +432,6 @@ local function startCameraFacing()
 		end
 		if not bossPos then return end
 
-		-- safely get camera position
 		local ok1, camPos = pcall(function() return cam.CFrame.Position end)
 		if ok1 and camPos then
 			local newCf = CFrame.new(camPos, bossPos)
@@ -387,11 +452,20 @@ end
 updateVersionLabel()
 
 autoBtn.MouseButton1Click:Connect(function()
+	-- if safety active, block enabling auto
+	if safetyTeleportActive then
+		status.Text = "Cannot enable Auto while safety mode is active."
+		return
+	end
 	auto = not auto
 	autoBtn.Text = auto and "Auto: ON" or "Auto: OFF"
 end)
 
 nowBtn.MouseButton1Click:Connect(function()
+	if not teleportNowAllowed() then
+		status.Text = "Teleport blocked: safety mode active."
+		return
+	end
 	local boss = workspace:FindFirstChild(BOSS_NAME)
 	local bossPart = boss and getModelRepresentativePart(boss)
 	if not bossPart then
@@ -426,46 +500,50 @@ end)
 -- Auto loop (handles Panic first, then teleport to farthest candy near boss)
 local stopping = false
 task.spawn(function()
-	-- start camera-facing after spawn
 	startCameraFacing()
 
 	while not stopping and screen.Parent do
 		if auto then
-			local boss = workspace:FindFirstChild(BOSS_NAME)
-			local bossPart = boss and getModelRepresentativePart(boss)
+			if safetyTeleportActive then
+				-- safety mode active: skip teleports
+				task.wait(0.5)
+			else
+				local boss = workspace:FindFirstChild(BOSS_NAME)
+				local bossPart = boss and getModelRepresentativePart(boss)
 
-			-- Panic check first (higher priority)
-			local panicked = false
-			if bossPart then
-				panicked = tryPanicTeleport(bossPart)
-				if panicked then
-					status.Text = "Panic teleport executed!"
-					task.wait(0.12)
-					task.wait(AUTO_INTERVAL)
-				else
-					-- not panicked; attempt far-away candy near boss
-					local candies = collectEligibleCandies(bossPart.Position.Y)
-					if #candies > 0 then
-						local pick = chooseFarthestCandy(candies, bossPart.Position)
-						if pick then
-							local ok, err = teleportToPart(pick)
-							if ok then
-								status.Text = "Auto-teleported to candy far from boss."
-								attachTouchFlag(pick)
+				-- Panic check first (higher priority)
+				local panicked = false
+				if bossPart then
+					panicked = tryPanicTeleport(bossPart)
+					if panicked then
+						status.Text = "Panic teleport executed!"
+						task.wait(0.12)
+						task.wait(AUTO_INTERVAL)
+					else
+						-- not panicked; attempt far-away candy near boss
+						local candies = collectEligibleCandies(bossPart.Position.Y)
+						if #candies > 0 then
+							local pick = chooseFarthestCandy(candies, bossPart.Position)
+							if pick then
+								local ok, err = teleportToPart(pick)
+								if ok then
+									status.Text = "Auto-teleported to candy far from boss."
+									attachTouchFlag(pick)
+								else
+									status.Text = "Auto teleport failed: "..tostring(err)
+								end
 							else
-								status.Text = "Auto teleport failed: "..tostring(err)
+								status.Text = "No suitable far candy; skipping teleport."
 							end
 						else
-							status.Text = "No suitable far candy; skipping teleport."
+							status.Text = "No eligible candies near boss."
 						end
-					else
-						status.Text = "No eligible candies near boss."
+						task.wait(AUTO_INTERVAL)
 					end
+				else
+					status.Text = "Boss not found; can't pick candies."
 					task.wait(AUTO_INTERVAL)
 				end
-			else
-				status.Text = "Boss not found; can't pick candies."
-				task.wait(AUTO_INTERVAL)
 			end
 		else
 			task.wait(0.25)
@@ -496,7 +574,6 @@ task.spawn(function()
 						if okVel and velMag then
 							speed = velMag
 						else
-							-- fallback to position delta over time
 							local now = tick()
 							local dt = math.max(0.001, now - lastBossCheck)
 							local okPos, spd = pcall(function()
@@ -510,7 +587,7 @@ task.spawn(function()
 						end
 						lastBossPos = bossPart.Position
 
-						-- get playing tracks via generic helper (handles Humanoid, AnimationController, Animator, etc.)
+						-- get playing tracks
 						local tracks = {}
 						local okTracks, resultTracks = pcall(function() return getAllPlayingTracks(boss) end)
 						if okTracks and resultTracks then tracks = resultTracks end
@@ -522,7 +599,6 @@ task.spawn(function()
 							local okP, playing = pcall(function() return t.IsPlaying end)
 							if okP and playing then
 								isPlaying = true
-								-- try to get the Animation instance on the track
 								local okA, animObj = pcall(function() return t.Animation end)
 								if okA and animObj and animObj.AnimationId then
 									local id = tostring(animObj.AnimationId)
@@ -537,7 +613,6 @@ task.spawn(function()
 						if foundAnimId then
 							lastAnimId = foundAnimId
 						end
-						-- update anim label text always: show current if playing, else show last known or N/A
 						if isPlaying then
 							animLabel.Text = ("Current Boss Anim ID: %s"):format(tostring(foundAnimId or lastAnimId or "(playing, id unknown)"))
 						else
@@ -546,29 +621,21 @@ task.spawn(function()
 
 						-- SPECIAL: if target anim is playing, do the special pause+single-roll+resume (with cooldown)
 						if (foundAnimId == TARGET_ANIM_ID) and (tick() - lastSpecialTrigger >= SPECIAL_COOLDOWN) then
-							-- only trigger if rollSpamEnabled was true at the moment of detection
 							lastSpecialTrigger = tick()
-							-- capture current state so we can restore it
 							local wasEnabled = rollSpamEnabled
-							-- stop spamming immediately
+							-- stop spamming immediately (only roll spam is affected by this special)
 							rollSpamEnabled = false
 							status.Text = ("Detected target anim %s — pausing roll spam for %.1fs then firing once..."):format(TARGET_ANIM_ID, SPECIAL_WAIT)
-							-- wait SPECIAL_WAIT seconds
 							task.wait(SPECIAL_WAIT)
-							-- fire a single roll (best-effort)
 							pcall(function() fireRoll(boss) end)
-							-- restore previous state
 							rollSpamEnabled = wasEnabled
-							-- small delay to avoid immediate re-triggering in same frame
 							task.wait(0.05)
-							-- continue main loop
 						else
 							-- fallback: original "stopped and animating" behavior (kept)
 							if speed <= STOP_SPEED_THRESHOLD and isPlaying then
 								status.Text = "Boss stopped & animating — pausing roll spam..."
 								task.wait(ROLL_PAUSE_ON_STOP)
 							else
-								-- normal roll fire
 								fireRoll(boss)
 								task.wait(ROLL_SPAM_INTERVAL)
 							end
@@ -588,7 +655,7 @@ task.spawn(function()
 	end
 end)
 
--- Additionally: a Heartbeat updater to keep the animLabel responsive even when rollSpamEnabled is false
+-- Heartbeat updater to keep animLabel responsive
 local heartbeatConn = RunService.Heartbeat:Connect(function()
 	if not screen.Parent then
 		if heartbeatConn and heartbeatConn.Connected then heartbeatConn:Disconnect() end
@@ -596,11 +663,9 @@ local heartbeatConn = RunService.Heartbeat:Connect(function()
 	end
 	local boss = workspace:FindFirstChild(BOSS_NAME)
 	if not boss or not boss:IsA("Model") then
-		-- no boss -> show last known or N/A
 		return
 	end
 
-	-- query playing tracks quickly
 	local okTracks, tracks = pcall(function() return getAllPlayingTracks(boss) end)
 	if not okTracks or not tracks then return end
 	local isPlaying = false
@@ -618,7 +683,6 @@ local heartbeatConn = RunService.Heartbeat:Connect(function()
 			end
 		end
 	end
-	-- update animLabel to reflect current playing (or keep last known)
 	if isPlaying then
 		animLabel.Text = ("Current Boss Anim ID: %s"):format(tostring(foundAnimId or "(playing, id unknown)"))
 	else
@@ -628,14 +692,24 @@ local heartbeatConn = RunService.Heartbeat:Connect(function()
 	end
 end)
 
+-- Monitor player's humanoid for low-health safety
+local function bindCharacter(char)
+	-- small delay to let humanoid appear
+	local humanoid = char:WaitForChild("Humanoid", 5)
+	if humanoid then
+		monitorHumanoid(humanoid)
+	end
+end
+
+-- initial character (if present) and CharacterAdded hook
+if player.Character then
+	bindCharacter(player.Character)
+end
+player.CharacterAdded:Connect(function(char) bindCharacter(char) end)
+
 -- cleanup
 screen.Destroying:Connect(function()
 	stopping = true
-	if cameraConn and cameraConn.Connected then
-		cameraConn:Disconnect()
-	end
-	if heartbeatConn and heartbeatConn.Connected then
-		heartbeatConn:Disconnect()
-	end
+	if cameraConn and cameraConn.Connected then cameraConn:Disconnect() end
+	if heartbeatConn and heartbeatConn.Connected then heartbeatConn:Disconnect() end
 end)
-
