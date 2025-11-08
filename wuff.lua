@@ -1,9 +1,9 @@
 -- LocalScript: Smart Candy auto-teleport + RollEvent spam + Panic + Camera-facing
 -- Place in StarterPlayer > StarterPlayerScripts
 
--- VERSION: 2
+-- VERSION: 3
 -- IMPORTANT: increment SCRIPT_VERSION when you make permanent script changes.
-local SCRIPT_VERSION = 2
+local SCRIPT_VERSION = 3
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -43,7 +43,7 @@ screen.Name = GUI_NAME
 screen.ResetOnSpawn = false
 
 local frame = Instance.new("Frame", screen)
-frame.Size = UDim2.new(0, 340, 0, 170) -- made taller to fit version UI
+frame.Size = UDim2.new(0, 340, 0, 170)
 frame.Position = UDim2.new(0, 12, 0, 60)
 frame.BackgroundTransparency = 0.15
 frame.BorderSizePixel = 0
@@ -106,14 +106,6 @@ versionLabel.TextSize = 14
 versionLabel.TextColor3 = Color3.fromRGB(180,180,180)
 versionLabel.TextXAlignment = Enum.TextXAlignment.Left
 
-local bumpBtn = Instance.new("TextButton", frame)
-bumpBtn.Size = UDim2.new(0, 70, 0, 20)
-bumpBtn.Position = UDim2.new(0, 152, 0, 104)
-bumpBtn.Font = Enum.Font.SourceSansBold
-bumpBtn.TextSize = 12
-bumpBtn.Text = "Bump v+1"
-bumpBtn.AutoButtonColor = true
-
 local noteLabel = Instance.new("TextLabel", frame)
 noteLabel.Size = UDim2.new(1, -12, 0, 30)
 noteLabel.Position = UDim2.new(0, 6, 0, 126)
@@ -122,7 +114,25 @@ noteLabel.Font = Enum.Font.SourceSans
 noteLabel.TextSize = 11
 noteLabel.TextColor3 = Color3.fromRGB(160,160,160)
 noteLabel.TextWrapped = true
-noteLabel.Text = "Tip: For a permanent version increase, edit the SCRIPT_VERSION constant at the top of this script."
+noteLabel.Text = "Tip: Edit the SCRIPT_VERSION constant at the top of this script for a permanent version change."
+
+-- ANIMATION GUI (placed beneath the main frame)
+local animFrame = Instance.new("Frame", screen)
+-- position directly under the main frame (uses current frame position/size)
+animFrame.Size = UDim2.new(0, 340, 0, 36)
+animFrame.Position = UDim2.new(frame.Position.X.Scale, frame.Position.X.Offset, frame.Position.Y.Scale, frame.Position.Y.Offset + frame.Size.Y.Offset + 8)
+animFrame.BackgroundTransparency = 0.25
+animFrame.BorderSizePixel = 0
+
+local animLabel = Instance.new("TextLabel", animFrame)
+animLabel.Size = UDim2.new(1, -12, 1, -8)
+animLabel.Position = UDim2.new(0, 6, 0, 4)
+animLabel.BackgroundTransparency = 1
+animLabel.Font = Enum.Font.SourceSans
+animLabel.TextSize = 14
+animLabel.TextColor3 = Color3.fromRGB(200,200,200)
+animLabel.TextXAlignment = Enum.TextXAlignment.Left
+animLabel.Text = "Last Boss Anim ID: N/A"
 
 -- helpers
 local function safeFindContainer()
@@ -176,10 +186,8 @@ local function chooseFarthestCandy(list, bossPos)
 				table.insert(candidates, {part=part,dist=d})
 			end
 		end
-		-- if still empty, return nil
 		if #candidates == 0 then return nil end
 	end
-	-- pick max distance
 	local best, bestDist = candidates[1].part, candidates[1].dist
 	for i=2,#candidates do
 		if candidates[i].dist > bestDist then
@@ -192,7 +200,6 @@ end
 
 local function randomChoice(list)
 	if not list or #list == 0 then return nil end
-	-- better randomness seed
 	local s = tick() * 1000 + #list + math.random(1, 1000)
 	math.randomseed(s)
 	return list[math.random(1, #list)]
@@ -320,13 +327,6 @@ local function updateVersionLabel()
 end
 updateVersionLabel()
 
--- runtime bump (does not persist across server restarts; edit SCRIPT_VERSION for a permanent change)
-bumpBtn.MouseButton1Click:Connect(function()
-	displayVersion = displayVersion + 1
-	updateVersionLabel()
-	status.Text = ("Version bumped to v%d (runtime only). Edit SCRIPT_VERSION for permanent change."):format(displayVersion)
-end)
-
 autoBtn.MouseButton1Click:Connect(function()
 	auto = not auto
 	autoBtn.Text = auto and "Auto: ON" or "Auto: OFF"
@@ -385,7 +385,6 @@ local function startCameraFacing()
 		if ok1 and ok2 and camPos and bossPos then
 			-- set camera orientation to look at boss while preserving position
 			local newCf = CFrame.new(camPos, bossPos)
-			-- apply non-explosive set in pcall
 			pcall(function() cam.CFrame = newCf end)
 		end
 	end)
@@ -445,6 +444,7 @@ end)
 task.spawn(function()
 	local lastBossPos = nil
 	local lastBossCheck = tick()
+	local lastAnimId = nil
 	while not stopping and screen.Parent do
 		if rollSpamEnabled then
 			local boss = workspace:FindFirstChild(BOSS_NAME)
@@ -455,20 +455,29 @@ task.spawn(function()
 				if bossPart and hrp then
 					local okDist, dist = pcall(function() return (bossPart.Position - hrp.Position).Magnitude end)
 					if okDist and dist and dist <= CLOSE_DISTANCE then
-						-- detect boss stopped moving (speed below threshold) AND boss is playing any animation
-						local bossPos = bossPart.Position
-						local now = tick()
-						local dt = math.max(0.001, now - lastBossCheck)
+						-- measure speed: prefer Velocity magnitude if available, fallback to pos delta
 						local speed = 0
-						if lastBossPos then
-							local okSpeed, s = pcall(function() return (bossPos - lastBossPos).Magnitude / dt end)
-							if okSpeed and s then speed = s end
+						local okVel, velMag = pcall(function() return bossPart.Velocity.Magnitude end)
+						if okVel and velMag then
+							speed = velMag
+						else
+							-- fallback to position delta over time
+							local now = tick()
+							local dt = math.max(0.001, now - lastBossCheck)
+							local okPos, spd = pcall(function()
+								if lastBossPos then
+									return (bossPart.Position - lastBossPos).Magnitude / dt
+								end
+								return 0
+							end)
+							speed = (okPos and spd) and spd or 0
+							lastBossCheck = now
 						end
-						lastBossPos = bossPos
-						lastBossCheck = now
+						lastBossPos = bossPart.Position
 
-						-- check for playing animations on boss's Humanoid (if any)
+						-- check for playing animations on boss's Humanoid and try to extract animation id
 						local isPlaying = false
+						local foundAnimId = nil
 						local okAnim, tracks = pcall(function()
 							local h = boss:FindFirstChildWhichIsA("Humanoid")
 							if h then
@@ -478,19 +487,40 @@ task.spawn(function()
 						end)
 						if okAnim and tracks and #tracks > 0 then
 							for _,t in ipairs(tracks) do
-								local ok, isP = pcall(function() return t.IsPlaying end)
-								if ok and isP then
+								local okP, playing = pcall(function() return t.IsPlaying end)
+								if okP and playing then
 									isPlaying = true
-									break
+									-- try to get the Animation.AnimationId (string like "rbxassetid://12345")
+									local okA, animObj = pcall(function() return t.Animation end)
+									if okA and animObj and animObj.AnimationId then
+										-- extract numeric id if possible
+										local id = tostring(animObj.AnimationId)
+										local digits = id:match("%d+")
+										if digits then
+											foundAnimId = digits
+										else
+											foundAnimId = id
+										end
+										break
+									end
 								end
 							end
+						end
+
+						-- update displayed last animation id if we found one
+						if foundAnimId then
+							lastAnimId = foundAnimId
+							animLabel.Text = ("Last Boss Anim ID: %s"):format(tostring(lastAnimId))
 						end
 
 						-- if boss essentially stopped AND is playing animation, pause roll spam for configured time
 						if speed <= STOP_SPEED_THRESHOLD and isPlaying then
 							status.Text = "Boss stopped & animating — pausing roll spam..."
+							-- ensure the animLabel shows something even if we didn't extract ID
+							if not lastAnimId then
+								animLabel.Text = "Last Boss Anim ID: (playing, id unknown)"
+							end
 							task.wait(ROLL_PAUSE_ON_STOP)
-							-- continue loop after pause; don't fire during the pause
 						else
 							-- normal roll fire
 							fireRoll(boss)
