@@ -8,7 +8,7 @@ local guiParent = player:WaitForChild("PlayerGui")
 -- CONFIG
 local CONTAINER_NAME = "CandyContainer"
 local TARGET_NAME = "Candy"           -- MeshPart name
-local AUTO_INTERVAL = 0.6            -- seconds between auto-teleports
+local AUTO_INTERVAL = 0.1            -- seconds between auto-teleports
 local TELEPORT_OFFSET = Vector3.new(0, 3, 0)
 
 -- clean old GUI
@@ -138,3 +138,4 @@ task.spawn(function()
 end)
 
 screen.Destroying:Connect(function() stopping = true end)
+
