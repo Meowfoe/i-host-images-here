@@ -32,7 +32,7 @@ local MIN_SAFE_TELEPORT_DISTANCE = 25        -- try to avoid teleporting to cand
 
 -- SPECIAL ANIMATION WATCH (user request)
 local TARGET_ANIM_ID = "79413205921631"     -- target animation id to watch for
-local SPECIAL_WAIT = 3.5                     -- seconds to wait AFTER detecting animation, before firing a single roll
+local SPECIAL_WAIT = 2                     -- seconds to wait AFTER detecting animation, before firing a single roll
 local SPECIAL_COOLDOWN = 5                   -- seconds cooldown between special triggers
 
 -- STOP DETECTION (kept but not primary for this feature)
@@ -638,3 +638,4 @@ screen.Destroying:Connect(function()
 		heartbeatConn:Disconnect()
 	end
 end)
+
