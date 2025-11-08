@@ -1,19 +1,27 @@
--- LocalScript: Barebones Roll Spam + WalkSpeed button
+-- LocalScript: Barebones Roll Spam + WalkSpeed button + instant proximity escape
 -- Place in StarterPlayer > StarterPlayerScripts
 
--- VERSION: 7
-local SCRIPT_VERSION = 7
+-- VERSION: 8
+local SCRIPT_VERSION = 8
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
 local player = Players.LocalPlayer
 local guiParent = player:WaitForChild("PlayerGui")
+local workspace = workspace
 
 -- CONFIG
 local GUI_NAME = "CandyContainerTeleporter_Barebones"
 local BOSS_NAME = "HalloweenBoss"
 local CLOSE_DISTANCE = 100       -- distance within which roll spam will fire
-local ROLL_SPAM_INTERVAL = 0.2   -- seconds between roll fires while spamming
+local ROLL_SPAM_INTERVAL = 0.01   -- seconds between roll fires while spamming
+
+-- PROXIMITY ESCAPE CONFIG
+local PROXIMITY_THRESHOLD = 10   -- if player is within this many studs of boss -> instant escape
+local ESCAPE_DISTANCE = 20       -- teleport player to this distance away from boss (studs)
+local ESCAPE_Y_OFFSET = 3        -- vertical offset to place player above ground at destination
+local ESCAPE_DEBOUNCE = 0.2      -- seconds debounce to avoid multi-teleports in the same moment
 
 -- cleanup old GUI
 local old = guiParent:FindFirstChild(GUI_NAME)
@@ -38,7 +46,7 @@ title.BackgroundTransparency = 1
 title.Font = Enum.Font.SourceSansSemibold
 title.TextSize = 18
 title.TextColor3 = Color3.fromRGB(235,235,235)
-title.Text = "Roll Spam — Barebones"
+title.Text = "Roll Spam + WalkSpeed + Proximity Escape"
 
 local close = Instance.new("TextButton", frame)
 close.Size = UDim2.new(0, 24, 0, 24)
@@ -110,7 +118,6 @@ end
 
 -- WalkSpeed behavior
 local desiredWalkSpeed = nil  -- if set, reapply on respawn
-
 local function applyWalkSpeedToHumanoid(humanoid, speed)
 	if not humanoid then return end
 	pcall(function() humanoid.WalkSpeed = speed end)
@@ -124,13 +131,11 @@ wsBtn.MouseButton1Click:Connect(function()
 		desiredWalkSpeed = 30
 		status.Text = "WalkSpeed set to 30."
 	else
-		-- set desired for when character spawns
 		desiredWalkSpeed = 30
 		status.Text = "Will set WalkSpeed to 30 on respawn."
 	end
 end)
 
--- reapply desired walkspeed on respawn
 local function onCharacterAdded(char)
 	if desiredWalkSpeed then
 		local humanoid = char:WaitForChild("Humanoid", 5)
@@ -180,7 +185,43 @@ task.spawn(function()
 	end
 end)
 
+-- Proximity watcher (Heartbeat for fastest reaction)
+local lastEscape = 0
+local heartbeatConn
+heartbeatConn = RunService.Heartbeat:Connect(function()
+	if not screen.Parent then return end
+	local boss = workspace:FindFirstChild(BOSS_NAME)
+	if not boss or not boss:IsA("Model") then return end
+	local bossPart = getModelRepresentativePart(boss)
+	if not bossPart then return end
+	local char = player.Character
+	local hrp = char and (char:FindFirstChild("HumanoidRootPart") or char:FindFirstChildWhichIsA("BasePart"))
+	if not hrp then return end
+
+	local ok, dist = pcall(function() return (bossPart.Position - hrp.Position).Magnitude end)
+	if not ok or not dist then return end
+
+	if dist <= PROXIMITY_THRESHOLD and (tick() - lastEscape) >= ESCAPE_DEBOUNCE then
+		lastEscape = tick()
+		-- compute random direction on XZ plane and teleport to ESCAPE_DISTANCE away from boss
+		local angle = math.random() * math.pi * 2
+		local dx = math.cos(angle) * ESCAPE_DISTANCE
+		local dz = math.sin(angle) * ESCAPE_DISTANCE
+		local targetPos = bossPart.Position + Vector3.new(dx, ESCAPE_Y_OFFSET, dz)
+		-- attempt immediate teleport (best-effort)
+		local okTp, err = pcall(function()
+			hrp.CFrame = CFrame.new(targetPos)
+		end)
+		if okTp then
+			status.Text = ("Proximity escape executed (%.1f studs -> %.1f studs)."):format(dist, ESCAPE_DISTANCE)
+		else
+			status.Text = ("Escape failed: %s"):format(tostring(err))
+		end
+	end
+end)
+
 -- cleanup
 screen.Destroying:Connect(function()
 	stopping = true
+	if heartbeatConn and heartbeatConn.Connected then heartbeatConn:Disconnect() end
 end)
