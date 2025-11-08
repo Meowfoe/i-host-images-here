@@ -2,7 +2,7 @@
 -- Place in StarterPlayer > StarterPlayerScripts
 
 -- VERSION: 8
-local SCRIPT_VERSION = 9
+local SCRIPT_VERSION = 10
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -19,9 +19,9 @@ local ROLL_SPAM_INTERVAL = 0.01   -- seconds between roll fires while spamming
 
 -- PROXIMITY ESCAPE CONFIG
 local PROXIMITY_THRESHOLD = 25   -- if player is within this many studs of boss -> instant escape
-local ESCAPE_DISTANCE = 50       -- teleport player to this distance away from boss (studs)
+local ESCAPE_DISTANCE = 20       -- teleport player to this distance away from boss (studs)
 local ESCAPE_Y_OFFSET = 3        -- vertical offset to place player above ground at destination
-local ESCAPE_DEBOUNCE = 0.2      -- seconds debounce to avoid multi-teleports in the same moment
+local ESCAPE_DEBOUNCE = 0.1      -- seconds debounce to avoid multi-teleports in the same moment
 
 -- cleanup old GUI
 local old = guiParent:FindFirstChild(GUI_NAME)
@@ -225,4 +225,5 @@ screen.Destroying:Connect(function()
 	stopping = true
 	if heartbeatConn and heartbeatConn.Connected then heartbeatConn:Disconnect() end
 end)
+
 
