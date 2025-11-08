@@ -1,15 +1,18 @@
--- LocalScript: Teleport to workspace.CandyContainer.Candy
+-- LocalScript: Candy teleporter + boss proximity RollEvent
 -- Place in StarterPlayer > StarterPlayerScripts
 
 local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local player = Players.LocalPlayer
 local guiParent = player:WaitForChild("PlayerGui")
 
 -- CONFIG
 local CONTAINER_NAME = "CandyContainer"
 local TARGET_NAME = "Candy"           -- MeshPart name
-local AUTO_INTERVAL = 0.1            -- seconds between auto-teleports
+local AUTO_INTERVAL = 0.1             -- seconds between auto-teleports (requested)
 local TELEPORT_OFFSET = Vector3.new(0, 3, 0)
+local BOSS_NAME = "HalloweenBoss"     -- model name to monitor in workspace
+local CLOSE_DISTANCE = 10             -- studs for "close" (adjust if you want)
 
 -- clean old GUI
 local old = guiParent:FindFirstChild("CandyContainerTeleporter")
@@ -90,6 +93,35 @@ local function teleportToTarget(part)
 	return ok, err
 end
 
+-- RollEvent firing helper (handles RemoteEvent / BindableEvent / RemoteFunction)
+local RollEvent = ReplicatedStorage:FindFirstChild("RollEvent")
+local function fireRollEvent(bossModel)
+	if not RollEvent then
+		return false, "RollEvent not found in ReplicatedStorage"
+	end
+	local ok, res
+	if RollEvent:IsA("RemoteEvent") then
+		ok, res = pcall(function() RollEvent:FireServer(bossModel and bossModel.Name or nil) end)
+	elseif RollEvent:IsA("BindableEvent") then
+		ok, res = pcall(function() RollEvent:Fire(bossModel and bossModel.Name or nil) end)
+	elseif RollEvent:IsA("RemoteFunction") then
+		ok, res = pcall(function() return RollEvent:InvokeServer(bossModel and bossModel.Name or nil) end)
+	else
+		return false, "RollEvent is not a supported event type"
+	end
+	return ok, res
+end
+
+-- helper: get a useful part from a model (PrimaryPart or first BasePart)
+local function getModelPart(model)
+	if not model or not model:IsA("Model") then return nil end
+	if model.PrimaryPart and model.PrimaryPart:IsA("BasePart") then return model.PrimaryPart end
+	for _,v in ipairs(model:GetDescendants()) do
+		if v:IsA("BasePart") then return v end
+	end
+	return nil
+end
+
 -- UI interactions
 local auto = false
 toggleBtn.MouseButton1Click:Connect(function()
@@ -107,11 +139,14 @@ nowBtn.MouseButton1Click:Connect(function()
 	status.Text = ok and "Teleported to Candy." or ("Teleport failed: "..tostring(e))
 end)
 
--- auto loop
+-- auto loop + boss proximity check (non-blocking)
 local stopping = false
+local bossPreviouslyClose = false
+
 task.spawn(function()
 	while not stopping and screen.Parent do
 		if auto then
+			-- Teleport to candy if present
 			local part, err = findCandy()
 			if part then
 				local ok, e = teleportToTarget(part)
@@ -121,8 +156,43 @@ task.spawn(function()
 					status.Text = "Auto teleport failed: "..tostring(e)
 				end
 			else
-				status.Text = "Auto: target missing ("..tostring(err)..")"
+				status.Text = "Auto: Candy missing ("..tostring(err)..")"
 			end
+
+			-- Boss proximity check
+			local boss = workspace:FindFirstChild(BOSS_NAME)
+			if boss and boss:IsA("Model") then
+				local bossPart = getModelPart(boss)
+				local char = player.Character
+				local hrp = char and (char:FindFirstChild("HumanoidRootPart") or char:FindFirstChildWhichIsA("BasePart"))
+				if bossPart and hrp then
+					local ok, dist = pcall(function() return (bossPart.Position - hrp.Position).Magnitude end)
+					if ok and dist then
+						if dist <= CLOSE_DISTANCE then
+							if not bossPreviouslyClose then
+								-- entered proximity: fire the RollEvent
+								local firedOk, firedRes = fireRollEvent(boss)
+								if firedOk then
+									-- optional: show a quick status update
+									status.Text = "Boss close — RollEvent fired."
+								else
+									status.Text = "RollEvent failed: "..tostring(firedRes)
+								end
+								bossPreviouslyClose = true
+							end
+						else
+							-- boss is not close; reset flag
+							if bossPreviouslyClose then
+								bossPreviouslyClose = false
+							end
+						end
+					end
+				end
+			else
+				-- boss not found
+				-- don't spam status; keep minimal
+			end
+
 			task.wait(AUTO_INTERVAL)
 		else
 			-- when auto is off, still report presence occasionally
@@ -138,4 +208,3 @@ task.spawn(function()
 end)
 
 screen.Destroying:Connect(function() stopping = true end)
-
