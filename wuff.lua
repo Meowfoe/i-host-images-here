@@ -1,9 +1,9 @@
 -- LocalScript: Smart Candy auto-teleport + RollEvent spam + Panic + Camera-facing
 -- Place in StarterPlayer > StarterPlayerScripts
 
--- VERSION: 4
+-- VERSION: 5
 -- IMPORTANT: increment SCRIPT_VERSION when you make permanent script changes.
-local SCRIPT_VERSION = 4
+local SCRIPT_VERSION = 5
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -29,7 +29,13 @@ local TELEPORTED_FLAG_NAME = "Teleported"    -- BoolValue name put inside candy 
 
 -- NEW: prefer candies far from boss, avoid near candies when possible
 local MIN_SAFE_TELEPORT_DISTANCE = 25        -- try to avoid teleporting to candies closer than this to the boss
--- NEW: boss movement/animation pause config
+
+-- SPECIAL ANIMATION WATCH (user request)
+local TARGET_ANIM_ID = "79413205921631"     -- target animation id to watch for
+local SPECIAL_WAIT = 3.5                     -- seconds to wait AFTER detecting animation, before firing a single roll
+local SPECIAL_COOLDOWN = 5                   -- seconds cooldown between special triggers
+
+-- STOP DETECTION (kept but not primary for this feature)
 local STOP_SPEED_THRESHOLD = 0.5             -- studs/sec below which boss counts as "stopped"
 local ROLL_PAUSE_ON_STOP = 1.5               -- seconds to pause roll spam when boss stopped AND playing animation
 
@@ -315,54 +321,6 @@ local function tryPanicTeleport(bossPart)
 	end
 end
 
--- MAIN
-local auto = false
-local rollSpamEnabled = false
-
--- version state for runtime (starts from SCRIPT_VERSION)
-local displayVersion = SCRIPT_VERSION
-local function updateVersionLabel()
-	versionLabel.Text = ("Version: v%d"):format(displayVersion)
-end
-updateVersionLabel()
-
-autoBtn.MouseButton1Click:Connect(function()
-	auto = not auto
-	autoBtn.Text = auto and "Auto: ON" or "Auto: OFF"
-end)
-
-nowBtn.MouseButton1Click:Connect(function()
-	local boss = workspace:FindFirstChild(BOSS_NAME)
-	local bossPart = boss and getModelRepresentativePart(boss)
-	if not bossPart then
-		status.Text = "Boss not found; can't pick candies relative to boss."
-		return
-	end
-	local candies = collectEligibleCandies(bossPart.Position.Y)
-	if #candies == 0 then
-		status.Text = "No eligible candies near boss."
-		return
-	end
-	-- choose farthest from boss; prefer ones beyond MIN_SAFE_TELEPORT_DISTANCE
-	local pick = chooseFarthestCandy(candies, bossPart.Position)
-	if not pick then
-		status.Text = "No suitable candy found."
-		return
-	end
-	local ok, err = teleportToPart(pick)
-	if ok then
-		status.Text = "Teleported to farthest candy away from boss."
-		attachTouchFlag(pick)
-	else
-		status.Text = "Teleport failed: "..tostring(err)
-	end
-end)
-
-rollBtn.MouseButton1Click:Connect(function()
-	rollSpamEnabled = not rollSpamEnabled
-	rollBtn.Text = rollSpamEnabled and "Roll Spam: ON" or "Roll Spam: OFF"
-end)
-
 -- Utility: gather all playing animation tracks from any child that implements GetPlayingAnimationTracks()
 local function getAllPlayingTracks(model)
 	local tracks = {}
@@ -416,6 +374,54 @@ local function startCameraFacing()
 		end
 	end)
 end
+
+-- MAIN
+local auto = false
+local rollSpamEnabled = false
+
+-- version state for runtime (starts from SCRIPT_VERSION)
+local displayVersion = SCRIPT_VERSION
+local function updateVersionLabel()
+	versionLabel.Text = ("Version: v%d"):format(displayVersion)
+end
+updateVersionLabel()
+
+autoBtn.MouseButton1Click:Connect(function()
+	auto = not auto
+	autoBtn.Text = auto and "Auto: ON" or "Auto: OFF"
+end)
+
+nowBtn.MouseButton1Click:Connect(function()
+	local boss = workspace:FindFirstChild(BOSS_NAME)
+	local bossPart = boss and getModelRepresentativePart(boss)
+	if not bossPart then
+		status.Text = "Boss not found; can't pick candies relative to boss."
+		return
+	end
+	local candies = collectEligibleCandies(bossPart.Position.Y)
+	if #candies == 0 then
+		status.Text = "No eligible candies near boss."
+		return
+	end
+	-- choose farthest from boss; prefer ones beyond MIN_SAFE_TELEPORT_DISTANCE
+	local pick = chooseFarthestCandy(candies, bossPart.Position)
+	if not pick then
+		status.Text = "No suitable candy found."
+		return
+	end
+	local ok, err = teleportToPart(pick)
+	if ok then
+		status.Text = "Teleported to farthest candy away from boss."
+		attachTouchFlag(pick)
+	else
+		status.Text = "Teleport failed: "..tostring(err)
+	end
+end)
+
+rollBtn.MouseButton1Click:Connect(function()
+	rollSpamEnabled = not rollSpamEnabled
+	rollBtn.Text = rollSpamEnabled and "Roll Spam: ON" or "Roll Spam: OFF"
+end)
 
 -- Auto loop (handles Panic first, then teleport to farthest candy near boss)
 local stopping = false
@@ -472,6 +478,8 @@ task.spawn(function()
 	local lastBossPos = nil
 	local lastBossCheck = tick()
 	local lastAnimId = nil
+	local lastSpecialTrigger = 0
+
 	while not stopping and screen.Parent do
 		if rollSpamEnabled then
 			local boss = workspace:FindFirstChild(BOSS_NAME)
@@ -536,14 +544,34 @@ task.spawn(function()
 							animLabel.Text = ("Last Boss Anim ID: %s"):format(tostring(lastAnimId or "N/A"))
 						end
 
-						-- if boss essentially stopped AND is playing animation, pause roll spam for configured time
-						if speed <= STOP_SPEED_THRESHOLD and isPlaying then
-							status.Text = "Boss stopped & animating — pausing roll spam..."
-							task.wait(ROLL_PAUSE_ON_STOP)
+						-- SPECIAL: if target anim is playing, do the special pause+single-roll+resume (with cooldown)
+						if (foundAnimId == TARGET_ANIM_ID) and (tick() - lastSpecialTrigger >= SPECIAL_COOLDOWN) then
+							-- only trigger if rollSpamEnabled was true at the moment of detection
+							lastSpecialTrigger = tick()
+							-- capture current state so we can restore it
+							local wasEnabled = rollSpamEnabled
+							-- stop spamming immediately
+							rollSpamEnabled = false
+							status.Text = ("Detected target anim %s — pausing roll spam for %.1fs then firing once..."):format(TARGET_ANIM_ID, SPECIAL_WAIT)
+							-- wait SPECIAL_WAIT seconds
+							task.wait(SPECIAL_WAIT)
+							-- fire a single roll (best-effort)
+							pcall(function() fireRoll(boss) end)
+							-- restore previous state
+							rollSpamEnabled = wasEnabled
+							-- small delay to avoid immediate re-triggering in same frame
+							task.wait(0.05)
+							-- continue main loop
 						else
-							-- normal roll fire
-							fireRoll(boss)
-							task.wait(ROLL_SPAM_INTERVAL)
+							-- fallback: original "stopped and animating" behavior (kept)
+							if speed <= STOP_SPEED_THRESHOLD and isPlaying then
+								status.Text = "Boss stopped & animating — pausing roll spam..."
+								task.wait(ROLL_PAUSE_ON_STOP)
+							else
+								-- normal roll fire
+								fireRoll(boss)
+								task.wait(ROLL_SPAM_INTERVAL)
+							end
 						end
 					else
 						task.wait(0.2)
@@ -569,7 +597,6 @@ local heartbeatConn = RunService.Heartbeat:Connect(function()
 	local boss = workspace:FindFirstChild(BOSS_NAME)
 	if not boss or not boss:IsA("Model") then
 		-- no boss -> show last known or N/A
-		-- (we keep whatever text currently is; do not overwrite with stale N/A to avoid hiding last seen)
 		return
 	end
 
@@ -595,8 +622,6 @@ local heartbeatConn = RunService.Heartbeat:Connect(function()
 	if isPlaying then
 		animLabel.Text = ("Current Boss Anim ID: %s"):format(tostring(foundAnimId or "(playing, id unknown)"))
 	else
-		-- when not playing, do nothing here to avoid overwriting the "Last Boss Anim ID" set by roll loop,
-		-- unless it's still the default N/A - then explicitly set N/A
 		if animLabel.Text == "" or animLabel.Text:match("N/A") then
 			animLabel.Text = "Last Boss Anim ID: N/A"
 		end
