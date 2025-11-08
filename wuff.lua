@@ -1,9 +1,9 @@
 -- LocalScript: Smart Candy auto-teleport + RollEvent spam + Panic + Camera-facing
 -- Place in StarterPlayer > StarterPlayerScripts
 
--- VERSION: 1
+-- VERSION: 2
 -- IMPORTANT: increment SCRIPT_VERSION when you make permanent script changes.
-local SCRIPT_VERSION = 1
+local SCRIPT_VERSION = 2
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -19,13 +19,19 @@ local CANDY_NAME_SUB = "candy"               -- substring to match candy names (
 local AUTO_INTERVAL = 0.1                    -- seconds between auto-teleports
 local TELEPORT_OFFSET = Vector3.new(0, 3, 0) -- small offset to place above candy
 local BOSS_NAME = "HalloweenBoss"
-local CLOSE_DISTANCE = 100                   -- UPDATED: RollEvent spam proximity (studs)
+local CLOSE_DISTANCE = 100                   -- RollEvent spam proximity (studs)
 local PANIC_DISTANCE = 10                    -- panic threshold (higher priority)
 local PANIC_ESCAPE_DISTANCE = 30             -- how far to push player away on panic
 local PANIC_COOLDOWN = 0.5                   -- seconds between panic teleports
-local ROLL_SPAM_INTERVAL = 0.2               -- UPDATED: spam speed when roll spam enabled
+local ROLL_SPAM_INTERVAL = 0.2               -- spam speed when roll spam enabled
 local BOSS_VERTICAL_TOLERANCE = 10           -- ± studs from boss Y allowed for candies
 local TELEPORTED_FLAG_NAME = "Teleported"    -- BoolValue name put inside candy once touched
+
+-- NEW: prefer candies far from boss, avoid near candies when possible
+local MIN_SAFE_TELEPORT_DISTANCE = 25        -- try to avoid teleporting to candies closer than this to the boss
+-- NEW: boss movement/animation pause config
+local STOP_SPEED_THRESHOLD = 0.5             -- studs/sec below which boss counts as "stopped"
+local ROLL_PAUSE_ON_STOP = 1.5               -- seconds to pause roll spam when boss stopped AND playing animation
 
 -- cleanup old GUI
 local old = guiParent:FindFirstChild(GUI_NAME)
@@ -90,7 +96,7 @@ rollBtn.Text = "Roll Spam: OFF"
 rollBtn.Font = Enum.Font.SourceSansBold
 rollBtn.TextSize = 14
 
--- VERSION UI (new)
+-- VERSION UI
 local versionLabel = Instance.new("TextLabel", frame)
 versionLabel.Size = UDim2.new(0, 140, 0, 20)
 versionLabel.Position = UDim2.new(0, 6, 0, 104)
@@ -100,7 +106,6 @@ versionLabel.TextSize = 14
 versionLabel.TextColor3 = Color3.fromRGB(180,180,180)
 versionLabel.TextXAlignment = Enum.TextXAlignment.Left
 
--- small bump button to increment version at runtime (useful for testing)
 local bumpBtn = Instance.new("TextButton", frame)
 bumpBtn.Size = UDim2.new(0, 70, 0, 20)
 bumpBtn.Position = UDim2.new(0, 152, 0, 104)
@@ -148,6 +153,41 @@ local function collectEligibleCandies(bossY)
 		end
 	end
 	return out
+end
+
+-- choose farthest candy from bossPos; prefer ones further than MIN_SAFE_TELEPORT_DISTANCE if any
+local function chooseFarthestCandy(list, bossPos)
+	if not list or #list == 0 then return nil end
+	local safeList = {}
+	for _,part in ipairs(list) do
+		local ok, d = pcall(function() return (part.Position - bossPos).Magnitude end)
+		if ok and d then
+			if d >= MIN_SAFE_TELEPORT_DISTANCE then
+				table.insert(safeList, {part=part,dist=d})
+			end
+		end
+	end
+	local candidates = safeList
+	if #candidates == 0 then
+		-- fallback: use all candies and still pick the farthest available
+		for _,part in ipairs(list) do
+			local ok, d = pcall(function() return (part.Position - bossPos).Magnitude end)
+			if ok and d then
+				table.insert(candidates, {part=part,dist=d})
+			end
+		end
+		-- if still empty, return nil
+		if #candidates == 0 then return nil end
+	end
+	-- pick max distance
+	local best, bestDist = candidates[1].part, candidates[1].dist
+	for i=2,#candidates do
+		if candidates[i].dist > bestDist then
+			best = candidates[i].part
+			bestDist = candidates[i].dist
+		end
+	end
+	return best
 end
 
 local function randomChoice(list)
@@ -304,10 +344,15 @@ nowBtn.MouseButton1Click:Connect(function()
 		status.Text = "No eligible candies near boss."
 		return
 	end
-	local pick = randomChoice(candies)
+	-- choose farthest from boss; prefer ones beyond MIN_SAFE_TELEPORT_DISTANCE
+	local pick = chooseFarthestCandy(candies, bossPart.Position)
+	if not pick then
+		status.Text = "No suitable candy found."
+		return
+	end
 	local ok, err = teleportToPart(pick)
 	if ok then
-		status.Text = "Teleported to random candy."
+		status.Text = "Teleported to farthest candy away from boss."
 		attachTouchFlag(pick)
 	else
 		status.Text = "Teleport failed: "..tostring(err)
@@ -346,7 +391,7 @@ local function startCameraFacing()
 	end)
 end
 
--- Auto loop (handles Panic first, then random candy near boss)
+-- Auto loop (handles Panic first, then teleport to farthest candy near boss)
 local stopping = false
 task.spawn(function()
 	-- start camera-facing after spawn
@@ -365,18 +410,21 @@ task.spawn(function()
 					status.Text = "Panic teleport executed!"
 					task.wait(0.12)
 					task.wait(AUTO_INTERVAL)
-					-- finished this iteration; continue next loop naturally
 				else
-					-- not panicked; attempt random candy near boss
+					-- not panicked; attempt far-away candy near boss
 					local candies = collectEligibleCandies(bossPart.Position.Y)
 					if #candies > 0 then
-						local pick = randomChoice(candies)
-						local ok, err = teleportToPart(pick)
-						if ok then
-							status.Text = "Auto-teleported to random candy."
-							attachTouchFlag(pick)
+						local pick = chooseFarthestCandy(candies, bossPart.Position)
+						if pick then
+							local ok, err = teleportToPart(pick)
+							if ok then
+								status.Text = "Auto-teleported to candy far from boss."
+								attachTouchFlag(pick)
+							else
+								status.Text = "Auto teleport failed: "..tostring(err)
+							end
 						else
-							status.Text = "Auto teleport failed: "..tostring(err)
+							status.Text = "No suitable far candy; skipping teleport."
 						end
 					else
 						status.Text = "No eligible candies near boss."
@@ -393,8 +441,10 @@ task.spawn(function()
 	end
 end)
 
--- Roll spam loop (spams RollEvent at ROLL_SPAM_INTERVAL while enabled and boss is within CLOSE_DISTANCE)
+-- Roll spam loop (spams RollEvent while enabled and boss is within CLOSE_DISTANCE)
 task.spawn(function()
+	local lastBossPos = nil
+	local lastBossCheck = tick()
 	while not stopping and screen.Parent do
 		if rollSpamEnabled then
 			local boss = workspace:FindFirstChild(BOSS_NAME)
@@ -403,10 +453,49 @@ task.spawn(function()
 				local char = player.Character
 				local hrp = char and (char:FindFirstChild("HumanoidRootPart") or char:FindFirstChildWhichIsA("BasePart"))
 				if bossPart and hrp then
-					local ok, dist = pcall(function() return (bossPart.Position - hrp.Position).Magnitude end)
-					if ok and dist and dist <= CLOSE_DISTANCE then
-						fireRoll(boss)
-						task.wait(ROLL_SPAM_INTERVAL)
+					local okDist, dist = pcall(function() return (bossPart.Position - hrp.Position).Magnitude end)
+					if okDist and dist and dist <= CLOSE_DISTANCE then
+						-- detect boss stopped moving (speed below threshold) AND boss is playing any animation
+						local bossPos = bossPart.Position
+						local now = tick()
+						local dt = math.max(0.001, now - lastBossCheck)
+						local speed = 0
+						if lastBossPos then
+							local okSpeed, s = pcall(function() return (bossPos - lastBossPos).Magnitude / dt end)
+							if okSpeed and s then speed = s end
+						end
+						lastBossPos = bossPos
+						lastBossCheck = now
+
+						-- check for playing animations on boss's Humanoid (if any)
+						local isPlaying = false
+						local okAnim, tracks = pcall(function()
+							local h = boss:FindFirstChildWhichIsA("Humanoid")
+							if h then
+								return h:GetPlayingAnimationTracks()
+							end
+							return {}
+						end)
+						if okAnim and tracks and #tracks > 0 then
+							for _,t in ipairs(tracks) do
+								local ok, isP = pcall(function() return t.IsPlaying end)
+								if ok and isP then
+									isPlaying = true
+									break
+								end
+							end
+						end
+
+						-- if boss essentially stopped AND is playing animation, pause roll spam for configured time
+						if speed <= STOP_SPEED_THRESHOLD and isPlaying then
+							status.Text = "Boss stopped & animating — pausing roll spam..."
+							task.wait(ROLL_PAUSE_ON_STOP)
+							-- continue loop after pause; don't fire during the pause
+						else
+							-- normal roll fire
+							fireRoll(boss)
+							task.wait(ROLL_SPAM_INTERVAL)
+						end
 					else
 						task.wait(0.2)
 					end
